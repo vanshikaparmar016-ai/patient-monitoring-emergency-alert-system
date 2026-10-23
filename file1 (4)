@@ -1,0 +1,2238 @@
+//phase2copy
+#include <Wire.h>
+
+#include <LiquidCrystal.h>
+
+#include <DHT.h>
+
+#include <OneWire.h>
+
+#include <DallasTemperature.h>
+
+#include <RTClib.h>
+
+#include <SoftwareSerial.h>
+
+
+
+
+
+// =====================================================
+
+// LCD
+
+// =====================================================
+
+
+
+LiquidCrystal lcd(8, 9, 10, 11, 12, 13);
+
+
+
+
+
+// =====================================================
+
+// GSM
+
+// =====================================================
+
+// SIM800L TX -> Arduino D6
+
+// Arduino D7 -> voltage divider -> SIM800L RX
+
+//
+
+// SoftwareSerial(RX, TX)
+
+// =====================================================
+
+
+
+SoftwareSerial gsm(6, 7);
+
+
+
+
+
+// =====================================================
+
+// PHONE NUMBER
+
+// =====================================================
+
+// CHANGE THE NUMBER ONLY HERE
+
+// =====================================================
+
+
+
+const char phoneNumber[] = "+919306525868"; // 
+
+
+
+
+
+// =====================================================
+
+// DHT11
+
+// =====================================================
+
+
+
+#define DHT_PIN   A3
+
+#define DHT_TYPE  DHT11
+
+
+
+DHT dht(DHT_PIN, DHT_TYPE);
+
+
+
+
+
+// =====================================================
+
+// DS18B20
+
+// =====================================================
+
+
+
+#define DS18B20_PIN A2
+
+
+
+OneWire oneWire(DS18B20_PIN);
+
+DallasTemperature sensors(&oneWire);
+
+
+
+
+
+// =====================================================
+
+// PHASE-1 SENSORS
+
+// =====================================================
+
+
+
+#define MQ135_PIN       A0
+
+#define BED_SWITCH      4
+
+#define EMERGENCY_BTN   3
+
+#define BUZZER_PIN      5
+
+
+
+
+
+// =====================================================
+
+// PHASE-2 SENSORS
+
+// =====================================================
+
+
+
+// Leakage / rain sensor
+
+// LOW  = WET / LEAKAGE
+
+// HIGH = DRY
+
+
+
+#define LEAK_SENSOR_PIN A1
+
+
+
+
+
+// SW-420 vibration sensor
+
+// LOW  = no vibration
+
+// HIGH = vibration detected
+
+
+
+#define VIBRATION_PIN 2
+
+
+
+
+
+// =====================================================
+
+// RTC
+
+// =====================================================
+
+// This project uses DS3231.
+
+//
+
+// SDA -> A4
+
+// SCL -> A5
+
+// =====================================================
+
+
+
+RTC_DS3231 rtc;
+
+
+
+bool rtcAvailable = false;
+
+
+
+
+
+// =====================================================
+
+// SENSOR VARIABLES
+
+// =====================================================
+
+
+
+float roomTemp = 0.0;
+
+float humidity = 0.0;
+
+float bodyTemp = 0.0;
+
+
+
+int mq135Value = 0;
+
+
+
+bool bedOccupied = false;
+
+bool emergencyPressed = false;
+
+
+
+bool leakDetected = false;
+
+bool vibrationDetected = false;
+
+
+
+
+
+// =====================================================
+
+// MQ-135 LEVELS
+
+// =====================================================
+
+//
+
+// 0 - 49      GOOD
+
+// 50 - 100    MODERATE
+
+// 101+        DANGEROUS
+
+// =====================================================
+
+
+
+const int MQ_GOOD_MAX = 49;
+
+const int MQ_MODERATE_MAX = 100;
+
+// Project-level room humidity alert threshold.
+const float HUMIDITY_ALERT = 90.0;
+const float HUMIDITY_RESET = 87.0;
+
+
+
+
+
+// =====================================================
+
+// BODY TEMPERATURE ALERT
+
+// =====================================================
+
+//
+
+// SMS + CALL only when body temperature reaches
+
+// this value.
+
+//
+
+// Change this value easily if required.
+
+// =====================================================
+
+
+
+const float BODY_TEMP_ALERT = 45.0;
+
+
+
+// Hysteresis reset value
+
+// Alert becomes armed again after temperature
+
+// falls below this value.
+
+
+
+const float BODY_TEMP_RESET = 43.0;
+
+
+
+
+
+// =====================================================
+
+// TIMING
+
+// =====================================================
+
+
+
+unsigned long lastDHTRead = 0;
+
+unsigned long lastMQRead = 0;
+
+unsigned long lastLCDUpdate = 0;
+
+
+
+unsigned long lastDSRequest = 0;
+
+unsigned long lastDSRead = 0;
+
+
+
+// LCD state timing is handled by lcdStateStart.
+
+
+
+
+
+// =====================================================
+
+// SENSOR INTERVALS
+
+// =====================================================
+
+
+
+const unsigned long DHT_INTERVAL = 2000;
+
+const unsigned long MQ_INTERVAL = 250;
+
+const unsigned long LCD_INTERVAL = 250;
+
+
+
+const unsigned long DS_CONVERSION_TIME = 200;
+
+
+
+
+
+// =====================================================
+
+// LCD PAGE
+
+// =====================================================
+
+
+
+// =====================================================
+// LCD DISPLAY STATE
+// =====================================================
+
+// Normal screen duration
+// Alert screen duration
+
+const unsigned long DISPLAY_PAGE_INTERVAL = 4000;
+const unsigned long ALERT_SCREEN_INTERVAL = 4000;
+
+enum LCDDisplayState
+{
+  LCD_PAGE1,
+  LCD_PAGE1_ALERT,
+  LCD_PAGE2,
+  LCD_PAGE2_ALERT
+};
+
+LCDDisplayState lcdDisplayState = LCD_PAGE1;
+
+unsigned long lcdStateStart = 0;
+
+// Alert types shown on the LCD.
+// Screen-1 alerts are shown after Screen 1.
+// Screen-2 vibration alert is shown after Screen 2.
+
+enum LCDAlertType
+{
+  LCD_ALERT_NONE,
+  LCD_ALERT_EMERGENCY,
+  LCD_ALERT_BODY_TEMP,
+  LCD_ALERT_HUMIDITY,
+  LCD_ALERT_AIR,
+  LCD_ALERT_LEAK,
+  LCD_ALERT_BED_EXIT,
+  LCD_ALERT_VIBRATION
+};
+
+LCDAlertType pendingScreen1Alert = LCD_ALERT_NONE;
+LCDAlertType pendingScreen2Alert = LCD_ALERT_NONE;
+
+DateTime lcdScreen1AlertTime;
+DateTime lcdScreen2AlertTime;
+
+float lcdAlertTemperature = 0.0;
+int lcdAlertAirValue = 0;
+int lcdAlertHumidity = 0;
+
+// Latches prevent a continuously active sensor from repeatedly
+// generating the same alert. They are re-armed after recovery.
+
+bool humidityAlertLatched = false;
+bool airAlertLatched = false;
+bool leakAlertLatched = false;
+bool bedExitAlertLatched = false;
+bool vibrationAlertLatched = false;
+
+bool previousBedOccupied = false;
+bool previousLeakDetected = false;
+bool previousVibrationDetected = false;
+
+
+
+
+
+// =====================================================
+
+// DS18B20 NON-BLOCKING
+
+// =====================================================
+
+
+
+bool dsConversionRunning = false;
+
+
+
+
+
+// =====================================================
+
+// ALERT LATCHES
+
+// =====================================================
+
+
+
+// Emergency SMS should be sent only once
+
+// for one button press.
+
+
+
+bool emergencyAlertLatched = false;
+
+
+
+
+
+// Body temperature SMS should be sent once
+
+// when temperature crosses the threshold.
+
+
+
+bool temperatureAlertLatched = false;
+
+
+
+
+
+// =====================================================
+
+// GSM STATE MACHINE
+
+// =====================================================
+
+
+
+enum GSMState
+
+{
+
+  GSM_STARTUP,
+
+  GSM_SET_MODE_WAIT,
+
+  GSM_READY,
+
+
+
+  GSM_SMS_MODE_WAIT,
+
+  GSM_CMGS_WAIT,
+
+  GSM_SMS_COMPLETE_WAIT,
+
+
+
+  GSM_BEFORE_CALL,
+
+  GSM_CALLING
+
+};
+
+
+
+GSMState gsmState = GSM_STARTUP;
+
+
+
+unsigned long gsmStateStart = 0;
+
+
+
+
+
+// =====================================================
+
+// GSM ALERT TYPES
+
+// =====================================================
+
+
+
+enum AlertType
+
+{
+
+  ALERT_NONE,
+
+  ALERT_EMERGENCY,
+
+  ALERT_BODY_TEMP
+
+};
+
+
+
+AlertType activeAlert = ALERT_NONE;
+
+
+
+
+
+// Pending alerts
+
+// Emergency has priority.
+
+
+
+bool pendingEmergencyAlert = false;
+
+bool pendingTemperatureAlert = false;
+
+
+
+
+
+// =====================================================
+
+// EVENT DATA
+
+// =====================================================
+
+
+
+float temperatureAtAlert = 0.0;
+
+
+
+DateTime emergencyAlertTime;
+
+DateTime temperatureAlertTime;
+
+
+
+
+
+// =====================================================
+
+// SETUP
+
+// =====================================================
+
+
+
+void setup()
+
+{
+
+  // ---------------------------------------------------
+
+  // LCD
+
+  // ---------------------------------------------------
+
+
+
+  lcd.begin(20, 4);
+
+
+
+  // ---------------------------------------------------
+
+  // Sensors
+
+  // ---------------------------------------------------
+
+
+
+  dht.begin();
+
+
+
+  sensors.begin();
+
+
+
+  // DS18B20 conversion will not block
+
+  sensors.setWaitForConversion(false);
+
+
+
+
+
+  // ---------------------------------------------------
+
+  // DIGITAL INPUTS
+
+  // ---------------------------------------------------
+
+
+
+  pinMode(BED_SWITCH, INPUT_PULLUP);
+
+
+
+  pinMode(EMERGENCY_BTN, INPUT_PULLUP);
+
+
+
+  pinMode(LEAK_SENSOR_PIN, INPUT_PULLUP);
+
+
+
+  pinMode(VIBRATION_PIN, INPUT);
+
+
+
+
+
+  // ---------------------------------------------------
+
+  // BUZZER
+
+  // ---------------------------------------------------
+
+
+
+  pinMode(BUZZER_PIN, OUTPUT);
+
+
+
+  // Active LOW
+
+  // HIGH = OFF
+
+
+
+  digitalWrite(BUZZER_PIN, HIGH);
+
+
+
+
+
+  // ---------------------------------------------------
+
+  // RTC
+
+  // ---------------------------------------------------
+
+
+
+  Wire.begin();
+
+
+
+  if (rtc.begin())
+
+  {
+
+    rtcAvailable = true;
+
+
+
+    // -------------------------------------------------
+
+    // IMPORTANT:
+
+    //
+
+    // DO NOT automatically adjust the RTC here.
+
+    //
+
+    // The manual setting instruction is given below.
+
+    // -------------------------------------------------
+
+   //rtc.adjust(DateTime(2026, 10, 5, 21, 14, 30));  // rtc.adjust(DateTime(YEAR, MONTH, DAY, HOUR, MINUTE, SECOND));
+
+
+
+  }
+
+  else
+
+  {
+
+    rtcAvailable = false;
+
+  }
+
+
+
+
+
+  // ---------------------------------------------------
+
+  // GSM
+
+  // ---------------------------------------------------
+
+
+
+  gsm.begin(9600);
+
+
+
+  // Start GSM stabilization timer
+
+  gsmState = GSM_STARTUP;
+
+  gsmStateStart = millis();
+
+
+
+
+
+  // ---------------------------------------------------
+
+  // WELCOME SCREEN
+
+  // ---------------------------------------------------
+
+
+
+  lcd.clear();
+
+
+
+  lcd.setCursor(0, 0);
+
+  lcd.print(" PATIENT HEALTH SYS");
+
+
+
+  lcd.setCursor(0, 1);
+
+  lcd.print(" PHASE 2 STARTING ");
+
+
+
+  lcd.setCursor(0, 2);
+
+
+
+  if (rtcAvailable)
+
+    lcd.print("RTC: READY        ");
+
+  else
+
+    lcd.print("RTC: NOT FOUND    ");
+
+
+
+  lcd.setCursor(0, 3);
+
+  lcd.print("GSM: STARTING     ");
+
+
+
+
+
+  // ---------------------------------------------------
+
+  // START DS18B20 CONVERSION
+
+  // ---------------------------------------------------
+
+
+
+  sensors.requestTemperatures();
+
+
+
+  lastDSRequest = millis();
+
+
+
+  dsConversionRunning = true;
+
+}
+
+
+
+
+
+// =====================================================
+
+// LOOP
+
+// =====================================================
+
+
+
+void loop()
+
+{
+
+  unsigned long now = millis();
+
+
+
+
+
+  // ===================================================
+
+  // READ BASIC DIGITAL SENSORS
+
+  // ===================================================
+
+
+
+  bedOccupied = (digitalRead(BED_SWITCH) == LOW);
+
+
+
+  emergencyPressed = (digitalRead(EMERGENCY_BTN) == LOW);
+
+
+
+  leakDetected = (digitalRead(LEAK_SENSOR_PIN) == LOW);
+
+
+
+  vibrationDetected = (digitalRead(VIBRATION_PIN) == HIGH);
+
+
+
+
+
+  // ===================================================
+
+  // EMERGENCY BUTTON
+
+  // ===================================================
+
+
+
+  if (emergencyPressed)
+
+  {
+
+    // Send only once per button press
+
+
+
+    if (!emergencyAlertLatched)
+
+    {
+
+      emergencyAlertLatched = true;
+
+
+
+      pendingEmergencyAlert = true;
+
+      // Also request an LCD alert after Screen 1.
+      pendingScreen1Alert = LCD_ALERT_EMERGENCY;
+
+      if (rtcAvailable)
+
+      {
+
+        emergencyAlertTime = rtc.now();
+        lcdScreen1AlertTime = emergencyAlertTime;
+
+      }
+
+    }
+
+  }
+
+  else
+
+  {
+
+    // Re-arm after button is released
+
+
+
+    emergencyAlertLatched = false;
+
+  }
+
+
+
+
+
+  // ===================================================
+
+  // DHT11
+
+  // ===================================================
+
+
+
+  if (now - lastDHTRead >= DHT_INTERVAL)
+
+  {
+
+    lastDHTRead = now;
+
+
+
+    float newHumidity = dht.readHumidity();
+
+    float newRoomTemp = dht.readTemperature();
+
+
+
+
+
+    if (!isnan(newHumidity))
+
+    {
+
+      humidity = newHumidity;
+
+    }
+
+
+
+
+
+    if (!isnan(newRoomTemp))
+
+    {
+
+      roomTemp = newRoomTemp;
+
+    }
+
+  }
+
+
+
+
+
+  // ===================================================
+
+  // MQ-135
+
+  // ===================================================
+
+
+
+  if (now - lastMQRead >= MQ_INTERVAL)
+
+  {
+
+    lastMQRead = now;
+
+
+
+    mq135Value = analogRead(MQ135_PIN);
+
+  }
+
+
+
+
+
+  // ===================================================
+
+  // DS18B20
+
+  // ===================================================
+
+
+
+  if (dsConversionRunning)
+
+  {
+
+    if (now - lastDSRequest >= DS_CONVERSION_TIME)
+
+    {
+
+      float newBodyTemp = sensors.getTempCByIndex(0);
+
+
+
+
+
+      if (newBodyTemp != DEVICE_DISCONNECTED_C &&
+
+          newBodyTemp > -50 &&
+
+          newBodyTemp < 100)
+
+      {
+
+        bodyTemp = newBodyTemp;
+
+      }
+
+
+
+
+
+      dsConversionRunning = false;
+
+
+
+      lastDSRead = now;
+
+    }
+
+  }
+
+  else
+
+  {
+
+    if (now - lastDSRead >= 1000)
+
+    {
+
+      sensors.requestTemperatures();
+
+
+
+      lastDSRequest = now;
+
+
+
+      dsConversionRunning = true;
+
+    }
+
+  }
+
+
+
+
+
+  // ===================================================
+
+  // BODY TEMPERATURE ALERT
+
+  // ===================================================
+
+
+
+  if (bodyTemp >= BODY_TEMP_ALERT)
+
+  {
+
+    if (!temperatureAlertLatched)
+
+    {
+
+      temperatureAlertLatched = true;
+
+
+
+      pendingTemperatureAlert = true;
+
+      // Also request an LCD alert after Screen 1.
+      pendingScreen1Alert = LCD_ALERT_BODY_TEMP;
+
+      temperatureAtAlert = bodyTemp;
+
+
+
+      if (rtcAvailable)
+
+      {
+
+        temperatureAlertTime = rtc.now();
+        lcdScreen1AlertTime = temperatureAlertTime;
+
+      }
+
+    }
+
+  }
+
+
+
+
+
+  // Re-arm after temperature comes down
+
+
+
+  if (bodyTemp <= BODY_TEMP_RESET)
+
+  {
+
+    temperatureAlertLatched = false;
+
+  }
+
+
+
+
+
+  // ===================================================
+
+  // GSM
+
+  // ===================================================
+
+
+
+  serviceGSM();
+
+
+
+
+
+  // ===================================================
+  // LCD DISPLAY STATE MACHINE
+  // ===================================================
+
+  serviceLCD(now);
+
+}
+
+
+
+
+
+// =====================================================
+
+// MQ-135 STATUS
+
+// =====================================================
+
+
+
+const char* getAirStatus()
+
+{
+
+  if (mq135Value < 50)
+
+  {
+
+    return "GOOD";
+
+  }
+
+  else if (mq135Value <= 100)
+
+  {
+
+    return "MODERATE";
+
+  }
+
+  else
+
+  {
+
+    return "DANGEROUS";
+
+  }
+
+}
+
+
+
+
+
+// =====================================================
+
+// GSM SERVICE
+
+// =====================================================
+
+
+
+void serviceGSM()
+
+{
+
+  unsigned long now = millis();
+
+
+
+
+
+  // ===================================================
+
+  // GSM STARTUP
+
+  // ===================================================
+
+
+
+  if (gsmState == GSM_STARTUP)
+
+  {
+
+    if (now - gsmStateStart >= 10000)
+
+    {
+
+      // Same command as reference code
+
+
+
+      gsm.println("AT+CMGF=1");
+
+
+
+      gsmState = GSM_SET_MODE_WAIT;
+
+
+
+      gsmStateStart = now;
+
+    }
+
+
+
+    return;
+
+  }
+
+
+
+
+
+  // ===================================================
+
+  // WAIT AFTER SMS MODE COMMAND
+
+  // ===================================================
+
+
+
+  if (gsmState == GSM_SET_MODE_WAIT)
+
+  {
+
+    if (now - gsmStateStart >= 3000)
+
+    {
+
+      gsmState = GSM_READY;
+
+
+
+      gsmStateStart = now;
+
+    }
+
+
+
+    return;
+
+  }
+
+
+
+
+
+  // ===================================================
+
+  // READY
+
+  // ===================================================
+
+
+
+  if (gsmState == GSM_READY)
+
+  {
+
+    // Emergency has priority
+
+
+
+    if (pendingEmergencyAlert)
+
+    {
+
+      activeAlert = ALERT_EMERGENCY;
+
+
+
+      pendingEmergencyAlert = false;
+
+
+
+      startSMS();
+
+
+
+      return;
+
+    }
+
+
+
+
+
+    // Body temperature is second priority
+
+
+
+    if (pendingTemperatureAlert)
+
+    {
+
+      activeAlert = ALERT_BODY_TEMP;
+
+
+
+      pendingTemperatureAlert = false;
+
+
+
+      startSMS();
+
+
+
+      return;
+
+    }
+
+
+
+
+
+    return;
+
+  }
+
+
+
+
+
+  // ===================================================
+
+  // SMS TEXT MODE WAIT
+
+  // ===================================================
+
+
+
+  if (gsmState == GSM_SMS_MODE_WAIT)
+
+  {
+
+    if (now - gsmStateStart >= 3000)
+
+    {
+
+      // Same AT+CMGS sequence as reference
+
+
+
+      gsm.print("AT+CMGS=\"");
+
+      gsm.print(phoneNumber);
+
+      gsm.println("\"");
+
+
+
+
+
+      gsmState = GSM_CMGS_WAIT;
+
+
+
+      gsmStateStart = now;
+
+    }
+
+
+
+    return;
+
+  }
+
+
+
+
+
+  // ===================================================
+
+  // WAIT AFTER AT+CMGS
+
+  // ===================================================
+
+
+
+  if (gsmState == GSM_CMGS_WAIT)
+
+  {
+
+    if (now - gsmStateStart >= 5000)
+
+    {
+
+      sendSMSBody();
+
+
+
+      gsm.write(26);   // CTRL + Z
+
+
+
+
+
+      // Same 15-second completion wait
+
+
+
+      gsmState = GSM_SMS_COMPLETE_WAIT;
+
+
+
+      gsmStateStart = now;
+
+    }
+
+
+
+    return;
+
+  }
+
+
+
+
+
+  // ===================================================
+
+  // WAIT FOR SMS COMPLETION
+
+  // ===================================================
+
+
+
+  if (gsmState == GSM_SMS_COMPLETE_WAIT)
+
+  {
+
+    if (now - gsmStateStart >= 15000)
+
+    {
+
+      // Same 3-second delay before call
+
+
+
+      gsmState = GSM_BEFORE_CALL;
+
+
+
+      gsmStateStart = now;
+
+    }
+
+
+
+    return;
+
+  }
+
+
+
+
+
+  // ===================================================
+
+  // BEFORE CALL
+
+  // ===================================================
+
+
+
+  if (gsmState == GSM_BEFORE_CALL)
+
+  {
+
+    if (now - gsmStateStart >= 3000)
+
+    {
+
+      gsm.print("ATD");
+
+      gsm.print(phoneNumber);
+
+      gsm.println(";");
+
+
+
+
+
+      gsmState = GSM_CALLING;
+
+
+
+      gsmStateStart = now;
+
+    }
+
+
+
+    return;
+
+  }
+
+
+
+
+
+  // ===================================================
+
+  // CALLING
+
+  // ===================================================
+
+
+
+  if (gsmState == GSM_CALLING)
+
+  {
+
+    if (now - gsmStateStart >= 10000)
+
+    {
+
+      // Same ATH command as reference
+
+
+
+      gsm.println("ATH");
+
+
+
+
+
+      activeAlert = ALERT_NONE;
+
+
+
+      gsmState = GSM_READY;
+
+
+
+      gsmStateStart = now;
+
+    }
+
+
+
+    return;
+
+  }
+
+}
+
+
+
+
+
+// =====================================================
+
+// START SMS
+
+// =====================================================
+
+
+
+void startSMS()
+
+{
+
+  // Same SMS text mode command from reference
+
+
+
+  gsm.println("AT+CMGF=1");
+
+
+
+  gsmState = GSM_SMS_MODE_WAIT;
+
+
+
+  gsmStateStart = millis();
+
+}
+
+
+
+
+
+// =====================================================
+
+// SEND SMS BODY
+
+// =====================================================
+
+
+
+void sendSMSBody()
+
+{
+  // Required test prefix on every SMS.
+  gsm.print("DEVICE TEST MESSAGE");
+  gsm.print("\r\n");
+  gsm.print("--------------------------------");
+  gsm.print("\r\n");
+
+  if (activeAlert == ALERT_EMERGENCY)
+
+  {
+
+    gsm.print("PATIENT EMERGENCY ALERT!");
+
+    gsm.print("\r\n");
+
+
+
+    gsm.print("Emergency button pressed.");
+
+    gsm.print("\r\n");
+
+
+
+    gsm.print("Patient needs immediate assistance.");
+
+    gsm.print("\r\n");
+
+
+
+    addDateTimeToSMS(emergencyAlertTime);
+
+  }
+
+
+
+
+
+  else if (activeAlert == ALERT_BODY_TEMP)
+
+  {
+
+    gsm.print("BODY TEMPERATURE ALERT!");
+
+    gsm.print("\r\n");
+
+
+
+    gsm.print("Body Temp: ");
+
+    gsm.print(temperatureAtAlert, 1);
+
+    gsm.print(" C");
+
+    gsm.print("\r\n");
+
+
+
+    gsm.print("Please check patient immediately.");
+
+    gsm.print("\r\n");
+
+
+
+    addDateTimeToSMS(temperatureAlertTime);
+
+  }
+
+}
+
+
+
+
+
+// =====================================================
+
+// ADD RTC DATE + TIME TO SMS
+
+// =====================================================
+
+
+
+void addDateTimeToSMS(DateTime dt)
+
+{
+
+  if (!rtcAvailable)
+
+  {
+
+    gsm.print("RTC: NOT AVAILABLE");
+
+    return;
+
+  }
+
+
+
+
+
+  gsm.print("Date: ");
+
+
+
+  if (dt.day() < 10)
+
+    gsm.print("0");
+
+
+
+  gsm.print(dt.day());
+
+
+
+  gsm.print("/");
+
+
+
+  if (dt.month() < 10)
+
+    gsm.print("0");
+
+
+
+  gsm.print(dt.month());
+
+
+
+  gsm.print("/");
+
+
+
+  gsm.print(dt.year());
+
+
+
+  gsm.print("\r\n");
+
+
+
+
+
+  gsm.print("Time: ");
+
+
+
+  if (dt.hour() < 10)
+
+    gsm.print("0");
+
+
+
+  gsm.print(dt.hour());
+
+
+
+  gsm.print(":");
+
+
+
+  if (dt.minute() < 10)
+
+    gsm.print("0");
+
+
+
+  gsm.print(dt.minute());
+
+
+
+  gsm.print(":");
+
+
+
+  if (dt.second() < 10)
+
+    gsm.print("0");
+
+
+
+  gsm.print(dt.second());
+
+}
+
+
+
+
+
+// =====================================================
+// LCD UPDATE
+// =====================================================
+
+// Print a complete LCD line. The line is first written with
+// the required content and then padded with spaces so no
+// character from the previous screen remains.
+//
+// We do NOT clear the LCD repeatedly during normal updates.
+// That would cause visible flicker, especially on RTEMP.
+
+// -----------------------------------------------------
+// RTC time on an LCD alert screen
+// -----------------------------------------------------
+
+void printAlertTime(DateTime dt)
+{
+  lcd.print("TIME:");
+
+  if (dt.hour() < 10) lcd.print("0");
+  lcd.print(dt.hour());
+  lcd.print(":");
+
+  if (dt.minute() < 10) lcd.print("0");
+  lcd.print(dt.minute());
+  lcd.print(":");
+
+  if (dt.second() < 10) lcd.print("0");
+  lcd.print(dt.second());
+}
+
+// -----------------------------------------------------
+// LCD STATE MACHINE
+// -----------------------------------------------------
+
+void serviceLCD(unsigned long now)
+{
+  // First update is immediate.
+  if (lcdStateStart == 0)
+    lcdStateStart = now;
+
+  // Move to the next display state only after the current
+  // screen has completed its full 4-second period.
+  if (now - lcdStateStart >= DISPLAY_PAGE_INTERVAL)
+  {
+    lcdStateStart = now;
+
+    if (lcdDisplayState == LCD_PAGE1)
+    {
+      if (pendingScreen1Alert != LCD_ALERT_NONE)
+        lcdDisplayState = LCD_PAGE1_ALERT;
+      else
+        lcdDisplayState = LCD_PAGE2;
+    }
+    else if (lcdDisplayState == LCD_PAGE1_ALERT)
+    {
+      pendingScreen1Alert = LCD_ALERT_NONE;
+      lcdDisplayState = LCD_PAGE2;
+    }
+    else if (lcdDisplayState == LCD_PAGE2)
+    {
+      if (pendingScreen2Alert != LCD_ALERT_NONE)
+        lcdDisplayState = LCD_PAGE2_ALERT;
+      else
+        lcdDisplayState = LCD_PAGE1;
+    }
+    else // LCD_PAGE2_ALERT
+    {
+      pendingScreen2Alert = LCD_ALERT_NONE;
+      lcdDisplayState = LCD_PAGE1;
+    }
+
+    // Clear only when changing to a different screen.
+    // This prevents residual characters while avoiding
+    // flicker during normal screen refreshes.
+    lcd.clear();
+  }
+
+  // Refresh the active screen at the normal LCD interval.
+  if (now - lastLCDUpdate >= LCD_INTERVAL)
+  {
+    lastLCDUpdate = now;
+
+    if (lcdDisplayState == LCD_PAGE1)
+      updatePage1();
+    else if (lcdDisplayState == LCD_PAGE1_ALERT)
+      updateScreen1Alert();
+    else if (lcdDisplayState == LCD_PAGE2)
+      updatePage2();
+    else
+      updateScreen2Alert();
+  }
+
+  // Buzzer is active only during the alert-screen period.
+  if (lcdDisplayState == LCD_PAGE1_ALERT ||
+      lcdDisplayState == LCD_PAGE2_ALERT)
+  {
+    // 300 ms ON / 300 ms OFF
+    if ((now / 300UL) % 2 == 0)
+      digitalWrite(BUZZER_PIN, LOW);
+    else
+      digitalWrite(BUZZER_PIN, HIGH);
+  }
+  else
+  {
+    digitalWrite(BUZZER_PIN, HIGH);
+  }
+}
+
+// =====================================================
+// PAGE 1
+// =====================================================
+
+void updatePage1()
+{
+  int used;
+  int humInt = (int)humidity;
+  int roomLen = (roomTemp < 10.0) ? 3 : 4;
+  int humLen = (humInt < 10) ? 1 : ((humInt < 100) ? 2 : 3);
+
+  // LINE 1: RTEMP + HUMIDITY
+  lcd.setCursor(0, 0);
+  lcd.print("RTEMP:");
+  lcd.print(roomTemp, 1);
+  lcd.print("C Hum:");
+  lcd.print(humInt);
+  lcd.print("%");
+
+  used = 6 + roomLen + 6 + humLen + 1;
+  for (int i = used; i < 20; i++)
+    lcd.print(" ");
+
+  // LINE 2: BODY TEMP + BED
+  int bodyLen = (bodyTemp < 10.0) ? 3 : 4;
+  int bedLen = bedOccupied ? 2 : 3;
+
+  lcd.setCursor(0, 1);
+  lcd.print("BTEMP:");
+  lcd.print(bodyTemp, 1);
+  lcd.print("C Bed:");
+  lcd.print(bedOccupied ? "ON" : "OFF");
+
+  used = 6 + bodyLen + 6 + bedLen;
+  for (int i = used; i < 20; i++)
+    lcd.print(" ");
+
+  // LINE 3: AIR QUALITY
+  const char *airStatus = getAirStatus();
+
+  lcd.setCursor(0, 2);
+  lcd.print("AIR:");
+
+  if (mq135Value < 100) lcd.print("0");
+  if (mq135Value < 10)  lcd.print("0");
+
+  lcd.print(mq135Value);
+  lcd.print(" ");
+  lcd.print(airStatus);
+
+  used = 4 + 3 + 1 + strlen(airStatus);
+  for (int i = used; i < 20; i++)
+    lcd.print(" ");
+
+  // LINE 4: EMERGENCY + LEAK
+  lcd.setCursor(0, 3);
+
+  if (emergencyPressed)
+  {
+    lcd.print("EMG:ALERT");
+    used = 9;
+  }
+  else
+  {
+    lcd.print("EMG:OK");
+    used = 6;
+  }
+
+  lcd.print(" LEAK:");
+  lcd.print(leakDetected ? "WET" : "DRY");
+  used += 1 + 5 + 3;
+
+  for (int i = used; i < 20; i++)
+    lcd.print(" ");
+}
+
+// =====================================================
+// PAGE 2
+// =====================================================
+
+void updatePage2()
+{
+  DateTime now;
+
+  // LINE 1: TIME
+  lcd.setCursor(0, 0);
+
+  if (rtcAvailable)
+  {
+    now = rtc.now();
+
+    lcd.print("TIME:");
+
+    if (now.hour() < 10) lcd.print("0");
+    lcd.print(now.hour());
+    lcd.print(":");
+
+    if (now.minute() < 10) lcd.print("0");
+    lcd.print(now.minute());
+    lcd.print(":");
+
+    if (now.second() < 10) lcd.print("0");
+    lcd.print(now.second());
+
+    lcd.print("       ");
+  }
+  else
+  {
+    lcd.print("TIME:RTC ERROR      ");
+  }
+
+  // LINE 2: DATE
+  lcd.setCursor(0, 1);
+
+  if (rtcAvailable)
+  {
+    lcd.print("DATE:");
+
+    if (now.day() < 10) lcd.print("0");
+    lcd.print(now.day());
+    lcd.print("/");
+
+    if (now.month() < 10) lcd.print("0");
+    lcd.print(now.month());
+    lcd.print("/");
+
+    lcd.print(now.year());
+    lcd.print("     ");
+  }
+  else
+  {
+    lcd.print("DATE:NOT AVAILABLE  ");
+  }
+
+  // LINE 3: VIBRATION
+  lcd.setCursor(0, 2);
+
+  if (vibrationDetected)
+    lcd.print("VIB:DETECTED (AID)  ");
+  else
+    lcd.print("VIB:NO MOVEMENT     ");
+
+  // LINE 4: GSM
+  lcd.setCursor(0, 3);
+
+  if (gsmState == GSM_READY)
+    lcd.print("GSM:READY           ");
+  else
+    lcd.print("GSM:WORKING         ");
+}
+
+// =====================================================
+// SCREEN-1 ALERT
+// =====================================================
+
+void updateScreen1Alert()
+{
+  DateTime t = lcdScreen1AlertTime;
+  int used;
+
+  if (pendingScreen1Alert == LCD_ALERT_EMERGENCY)
+  {
+    lcd.setCursor(0, 0);
+    lcd.print("EMERGENCY ALERT");
+    lcd.print("     ");
+
+    lcd.setCursor(0, 1);
+    lcd.print("BUTTON PRESSED");
+    lcd.print("      ");
+
+    lcd.setCursor(0, 2);
+    lcd.print("CHECK PATIENT");
+    lcd.print("       ");
+  }
+  else if (pendingScreen1Alert == LCD_ALERT_BODY_TEMP)
+  {
+    lcd.setCursor(0, 0);
+    lcd.print("TEMPERATURE ALERT");
+    lcd.print("   ");
+
+    lcd.setCursor(0, 1);
+    lcd.print("BTEMP:");
+    lcd.print(temperatureAtAlert, 1);
+    lcd.print("C HIGH");
+
+    used = 6 + 4 + 6;
+    for (int i = used; i < 20; i++)
+      lcd.print(" ");
+
+    lcd.setCursor(0, 2);
+    lcd.print("CHECK PATIENT");
+    lcd.print("       ");
+  }
+  else if (pendingScreen1Alert == LCD_ALERT_HUMIDITY)
+  {
+    lcd.setCursor(0, 0);
+    lcd.print("HUMIDITY ALERT");
+    lcd.print("      ");
+
+    lcd.setCursor(0, 1);
+    lcd.print("HUM:");
+    lcd.print(lcdAlertHumidity);
+    lcd.print("% HIGH");
+
+    used = 4 + ((lcdAlertHumidity < 10) ? 1 :
+                ((lcdAlertHumidity < 100) ? 2 : 3)) + 6;
+    for (int i = used; i < 20; i++)
+      lcd.print(" ");
+
+    lcd.setCursor(0, 2);
+    lcd.print("CHECK ROOM");
+    lcd.print("          ");
+  }
+  else if (pendingScreen1Alert == LCD_ALERT_AIR)
+  {
+    lcd.setCursor(0, 0);
+    lcd.print("AIR QUALITY ALERT");
+    lcd.print("   ");
+
+    lcd.setCursor(0, 1);
+    lcd.print("AIR:");
+    lcd.print(lcdAlertAirValue);
+    lcd.print(" DANGEROUS");
+
+    used = 4 + ((lcdAlertAirValue < 10) ? 1 :
+                ((lcdAlertAirValue < 100) ? 2 :
+                 ((lcdAlertAirValue < 1000) ? 3 : 4))) + 10;
+    for (int i = used; i < 20; i++)
+      lcd.print(" ");
+
+    lcd.setCursor(0, 2);
+    lcd.print("CHECK ROOM AIR");
+    lcd.print("      ");
+  }
+  else if (pendingScreen1Alert == LCD_ALERT_LEAK)
+  {
+    lcd.setCursor(0, 0);
+    lcd.print("MOISTURE ALERT");
+    lcd.print("      ");
+
+    lcd.setCursor(0, 1);
+    lcd.print("LEAKAGE DETECTED");
+    lcd.print("    ");
+
+    lcd.setCursor(0, 2);
+    lcd.print("CHECK PATIENT BED");
+    lcd.print("   ");
+  }
+  else if (pendingScreen1Alert == LCD_ALERT_BED_EXIT)
+  {
+    lcd.setCursor(0, 0);
+    lcd.print("BED EXIT ALERT");
+    lcd.print("      ");
+
+    lcd.setCursor(0, 1);
+    lcd.print("PATIENT LEFT BED");
+    lcd.print("    ");
+
+    lcd.setCursor(0, 2);
+    lcd.print("CHECK PATIENT");
+    lcd.print("       ");
+  }
+
+  lcd.setCursor(0, 3);
+
+  if (rtcAvailable)
+    printAlertTime(t);
+  else
+    lcd.print("TIME:RTC ERROR");
+
+  lcd.print("      ");
+}
+
+// =====================================================
+// SCREEN-2 ALERT
+// =====================================================
+
+void updateScreen2Alert()
+{
+  DateTime t = lcdScreen2AlertTime;
+
+  lcd.setCursor(0, 0);
+  lcd.print("VIBRATION ALERT");
+  lcd.print("     ");
+
+  lcd.setCursor(0, 1);
+  lcd.print("PATIENT MOVEMENT");
+  lcd.print("    ");
+
+  lcd.setCursor(0, 2);
+  lcd.print("ASSISTANCE REQUIRED");
+  lcd.print(" ");
+
+  lcd.setCursor(0, 3);
+
+  if (rtcAvailable)
+    printAlertTime(t);
+  else
+    lcd.print("TIME:RTC ERROR");
+
+  lcd.print("      ");
+}
